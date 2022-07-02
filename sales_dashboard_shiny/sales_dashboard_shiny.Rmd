@@ -1,0 +1,267 @@
+---
+title: "Sales Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    hotizontal_layout: fill
+    
+  runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+
+# Core
+library(tidyverse)
+
+# Interactive Visualizations
+library(plotly)
+
+# Spatial Data
+library(raster)
+library(sf)
+
+library(shiny)
+library(DT)
+library(lubridate)
+library(dplyr)
+
+# Currency formatting
+source("plot_sales.R")
+```
+
+```{r}
+# Bike data
+bikes_tbl      <- readRDS("bikes_tbl.rds")
+bikeshops_tbl  <- readRDS("bikeshops_tbl.rds")
+orderlines_tbl <- readRDS("orderlines_tbl.rds")
+
+
+bike_orderlines_tbl <- orderlines_tbl %>%
+    left_join(bikes_tbl,     by = c("product_id" = "bike_id")) %>%
+    left_join(bikeshops_tbl, by = c("customer_id" = "bikeshop_id")) %>%
+    mutate(total_price = price_euro * quantity)
+
+# German spatial data
+germany_sp <- getData('GADM', country='DE', level=1) 
+# Convert SpatialPolygonsDataFrame to an sf dataframe
+germany_sf <- st_as_sf(germany_sp) %>% 
+                  # Add english names
+                  mutate(VARNAME_1 = ifelse(is.na(VARNAME_1), NAME_1, VARNAME_1)) 
+```
+
+
+Sidebar {.sidebar}
+------------------------
+
+```{r}
+# Inputs
+dateRangeInput(inputId = "date_range", 
+               label   = h4("Date Range"), 
+               start  = min(bike_orderlines_tbl$order_date), 
+               end    = max(bike_orderlines_tbl$order_date),        
+               min     = min(bike_orderlines_tbl$order_date), 
+               max     = max(bike_orderlines_tbl$order_date), 
+               startview = "year")
+
+checkboxGroupInput(inputId = "bike_type", 
+                   label   = h4("Bike Type"), 
+                   choices = unique(bike_orderlines_tbl$category_1), 
+                   selected = unique(bike_orderlines_tbl$category_1))
+
+
+selectInput(inputId = "bike_family", 
+            label = h4("Bike Family"),
+            choices = unique(bike_orderlines_tbl$category_2),
+            selected = "Race")
+
+```
+```{r}
+# Reset Button
+actionButton(inputId = "reset", 
+             label   = "Reset", 
+             icon    = icon("sync"))
+
+
+observeEvent(eventExpr = input$reset, handlerExpr = {
+  
+  updateDateRangeInput(session = session, 
+                       inputId = "date_range", 
+                       start  = min(bike_orderlines_tbl$order_date), 
+                       end    = max(bike_orderlines_tbl$order_date))
+  
+  updateCheckboxGroupInput(session  = session, 
+                           inputId  = "bike_type", 
+                           selected= unique(bike_orderlines_tbl$category_1))
+  
+  
+  updateSelectInput(session = session, 
+                    inputId = "bike_family",
+                     selected= "Race")
+  
+  
+})
+
+```
+
+
+```{r}
+# Reactive Filter
+filtered_data <- reactive ({
+  
+  bike_orderlines_tbl %>% 
+    dplyr::filter(category_1 %in% input$bike_type) %>% 
+    dplyr::filter(category_2 %in% input$bike_family) %>% 
+    dplyr::filter((order_date >=  as.Date(input$date_range[1])) && (order_date <=  as.Date(input$date_range[2])) )
+  
+  
+})
+
+```
+
+
+Row {data-height=100}
+---------------------------------------------------------------
+
+### Orders
+```{r}
+output$orders_values <- renderValueBox({expr = count (filtered_data()) })
+
+valueBoxOutput(outputId = "orders_values")
+
+```
+
+### Sales
+```{r}
+output$sale_values <- renderValueBox({expr = filtered_data() %>% summarise(sum(total_price)) })
+
+valueBoxOutput(outputId = "sale_values")
+
+```
+
+Row {data-width=500}
+---------------------------------------------------------------
+
+### By State
+```{r}
+output$output_map <-renderPlotly({
+  plot_ly(
+      filtered_data() %>%
+      group_by(state) %>%
+      summarise(total_revenue = sum(total_price)) %>%
+      ungroup() %>%
+      right_join(germany_sf, by = c("state" = "VARNAME_1")) %>%
+      mutate(total_revenue = ifelse(is.na(total_revenue), 0, total_revenue)) %>%
+      mutate(label_text = str_glue("State: {state}
+                             Revenue: {format_to_euro(total_revenue)}")) %>%
+      # Convert back to an sf object, that can be plotted
+      st_as_sf(),
+
+      split      = ~NAME_1,
+      color      = ~total_revenue,
+      colors     = "Blues",
+      stroke     = I("black"),
+      hoverinfo  = 'text',
+      text       = ~label_text,
+      hoveron    = "fills",
+      showlegend = FALSE)
+})
+
+plotlyOutput("output_map")
+```
+
+### Over Time
+
+```{r, echo=FALSE}
+# Ploting function
+plotting <- function(unit = "month", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE) {
+
+  # Handle Data
+
+  data_tbl <- filtered_data() %>%
+    dplyr::select(order_date, total_price) %>%
+    mutate(date_rounded = floor_date(order_date, unit = unit)) %>%
+
+    group_by(date_rounded) %>%
+    summarise(total_sales = sum(total_price)) %>%
+    ungroup() %>%
+
+    mutate(label_text = str_glue("Sales: {format_to_euro(total_sales)}
+                                 Date: {date_rounded %>% format(date_format)}"))
+
+
+  # Make Plot
+  g2 <- data_tbl %>%
+    ggplot(aes(x = date_rounded, y = total_sales)) +
+
+    # Geoms
+    geom_point(aes(text = label_text, color = "#2c3e50")) +
+    geom_smooth(method = "loess", span = 0.2) +
+
+    # Formatting
+    expand_limits(y = 0) +
+    theme(legend.position = "none",
+          strip.text.x = element_text(margin = margin(5, 5, 5, 5, unit = "pt"))) +
+    scale_y_continuous(labels = euro_format(scale = 1e-3, suffix = "K €")) +
+    labs(
+      title = "Total Sales",
+      y = "", x = ""
+    )
+
+
+  # Static Vs Interactive Logic
+  if (interactive) {
+    return(ggplotly(g2, tooltip = "text"))
+  } else {
+    return(g2)
+  }
+
+}
+
+## Daily
+output$plot_daily <-renderPlotly({ plotting(
+                            unit = "day", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE)})
+#plotlyOutput("plot_daily")
+
+## Weekly
+output$plot_weekly <-renderPlotly({ plotting(
+                            unit = "weekly", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE)})
+#plotlyOutput("plot_weekly")
+
+## Monthly
+output$plot_monthly <-renderPlotly({ plotting(
+                            unit = "monthly", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE)})
+#plotlyOutput("plot_monthly")
+
+
+## Quarterly
+output$plot_quarterly <-renderPlotly({ plotting(
+                            unit = "quarterly", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE)})
+#plotlyOutput("plot_quarterly")
+
+## Yearly
+output$plot_yearly <-renderPlotly({ plotting(
+                            unit = "yearly", date_format = "%B %Y",
+                            ncol = 1, scales = "free_y",
+                            interactive = TRUE)})
+#plotlyOutput("plot_yearly")
+
+
+tabsetPanel(type = "tabs",
+            tabPanel("D", plotlyOutput("plot_daily")),
+            tabPanel("W", plotlyOutput("plot_weekly")),
+            tabPanel("M", plotlyOutput("plot_monthly")),
+            tabPanel("Q", plotlyOutput("plot_quarterly")),
+            tabPanel("Y", plotlyOutput("plot_yearly")))
+
+```

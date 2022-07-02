@@ -1,0 +1,13 @@
+name: sales_dashboard_shiny
+title:
+username:
+account: outlawedengineer
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 6583097
+bundleId: 6064323
+url: https://outlawedengineer.shinyapps.io/sales_dashboard_shiny/
+when: 1656794681.926
+lastSyncTime: 1656794681.92601
+asMultiple: FALSE
+asStatic: FALSE
